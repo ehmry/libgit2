@@ -301,7 +301,7 @@ typedef enum git_cert_t {
          * The `data` argument to the callback will be a pointer to a
          * `git_cert_hostkey` structure.
          */
-	GIT_CERT_HOSTKEY_LIBSSH2,
+	GIT_CERT_HOSTKEY_SSH,
 	/**
 	 * The `data` argument to the callback will be a pointer to a
 	 * `git_strarray` with `name:content` strings containing

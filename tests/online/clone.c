@@ -517,7 +517,7 @@ int ssh_certificate_check(git_cert *cert, int valid, const char *host, void *pay
 	cl_assert(_remote_ssh_fingerprint);
 
 	cl_git_pass(git_oid_fromstrp(&expected, _remote_ssh_fingerprint));
-	cl_assert_equal_i(GIT_CERT_HOSTKEY_LIBSSH2, cert->cert_type);
+	cl_assert_equal_i(GIT_CERT_HOSTKEY_SSH, cert->cert_type);
 	key = (git_cert_hostkey *) cert;
 
 	/*
@@ -525,13 +525,16 @@ int ssh_certificate_check(git_cert *cert, int valid, const char *host, void *pay
 	 * the type. Here we abuse the fact that both hashes fit into
 	 * our git_oid type.
 	 */
-	if (strlen(_remote_ssh_fingerprint) == 32 && key->type & GIT_CERT_SSH_MD5) {
-		memcpy(&actual.id, key->hash_md5, 16);
-	} else 	if (strlen(_remote_ssh_fingerprint) == 40 && key->type & GIT_CERT_SSH_SHA1) {
+	if (strlen(_remote_ssh_fingerprint) == 64 && key->type & GIT_CERT_SSH_SHA256)
+		memcpy(&actual, key->hash_sha256, 32);
+	else if (strlen(_remote_ssh_fingerprint) == 40 && key->type & GIT_CERT_SSH_SHA1)
 		memcpy(&actual, key->hash_sha1, 20);
-	} else {
+#ifdef MD5
+	else if (strlen(_remote_ssh_fingerprint) == 32 && key->type & GIT_CERT_SSH_MD5)
+		memcpy(&actual.id, key->hash_md5, 16);
+#endif
+	else
 		cl_fail("Cannot find a usable SSH hash");
-	}
 
 	cl_assert(!memcmp(&expected, &actual, 20));
 

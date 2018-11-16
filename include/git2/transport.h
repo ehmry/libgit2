@@ -27,35 +27,47 @@ typedef int (*git_transport_cb)(git_transport **out, git_remote *owner, void *pa
  * Type of SSH host fingerprint
  */
 typedef enum {
+#ifdef GIT_MD5
 	/** MD5 is available */
 	GIT_CERT_SSH_MD5 = (1 << 0),
+#endif
 	/** SHA-1 is available */
 	GIT_CERT_SSH_SHA1 = (1 << 1),
+	/** SHA-256 is available */
+	GIT_CERT_SSH_SHA256 = (1 << 2),
 } git_cert_ssh_t;
 
 /**
- * Hostkey information taken from libssh2
+ * Hostkey information taken from SSH library
  */
 typedef struct {
 	git_cert parent;
 
 	/**
-	 * A hostkey type from libssh2, either
-	 * `GIT_CERT_SSH_MD5` or `GIT_CERT_SSH_SHA1`
+	 * A hostkey type, either
+	 * `GIT_CERT_SSH_MD5`, `GIT_CERT_SSH_SHA1`, or 'GIT_CERT_SSH_SHA256'
 	 */
 	git_cert_ssh_t type;
 
+#ifdef GIT_MD5
 	/**
 	 * Hostkey hash. If type has `GIT_CERT_SSH_MD5` set, this will
 	 * have the MD5 hash of the hostkey.
 	 */
 	unsigned char hash_md5[16];
+#endif
 
 	/**
 	 * Hostkey hash. If type has `GIT_CERT_SSH_SHA1` set, this will
 	 * have the SHA-1 hash of the hostkey.
 	 */
 	unsigned char hash_sha1[20];
+
+	/**
+	 * Hostkey hash. If type has `GIT_CERT_SSH_SHA256` set, this will
+	 * have the SHA-256 hash of the hostkey.
+	 */
+	unsigned char hash_sha256[32];
 } git_cert_hostkey;
 
 /**
@@ -126,6 +138,7 @@ typedef struct {
 } git_cred_userpass_plaintext;
 
 
+#ifdef GIT_LIBSSH2
 /*
  * If the user hasn't included libssh2.h before git2.h, we need to
  * define a few types for the callback signatures.
@@ -139,6 +152,8 @@ typedef struct _LIBSSH2_USERAUTH_KBDINT_RESPONSE LIBSSH2_USERAUTH_KBDINT_RESPONS
 typedef int (*git_cred_sign_callback)(LIBSSH2_SESSION *session, unsigned char **sig, size_t *sig_len, const unsigned char *data, size_t data_len, void **abstract);
 typedef void (*git_cred_ssh_interactive_callback)(const char* name, int name_len, const char* instruction, int instruction_len, int num_prompts, const LIBSSH2_USERAUTH_KBDINT_PROMPT* prompts, LIBSSH2_USERAUTH_KBDINT_RESPONSE* responses, void **abstract);
 
+#endif
+
 /**
  * A ssh key from disk
  */
@@ -150,6 +165,7 @@ typedef struct git_cred_ssh_key {
 	char *passphrase;
 } git_cred_ssh_key;
 
+#ifdef GIT_LIBSSH2
 /**
  * Keyboard-interactive based ssh authentication
  */
@@ -171,6 +187,7 @@ typedef struct git_cred_ssh_custom {
 	git_cred_sign_callback sign_callback;
 	void *payload;
 } git_cred_ssh_custom;
+#endif
 
 /** A key for NTLM/Kerberos "default" credentials */
 typedef struct git_cred git_cred_default;
@@ -221,6 +238,7 @@ GIT_EXTERN(int) git_cred_ssh_key_new(
 	const char *privatekey,
 	const char *passphrase);
 
+#ifdef GIT_LIBSSH2
 /**
  * Create a new ssh keyboard-interactive based credential object.
  * The supplied credential parameter will be internally duplicated.
@@ -235,6 +253,7 @@ GIT_EXTERN(int) git_cred_ssh_interactive_new(
 	const char *username,
 	git_cred_ssh_interactive_callback prompt_callback,
 	void *payload);
+#endif
 
 /**
  * Create a new ssh key credential object used for querying an ssh-agent.
@@ -248,6 +267,7 @@ GIT_EXTERN(int) git_cred_ssh_key_from_agent(
 	git_cred **out,
 	const char *username);
 
+#ifdef GIT_LIBSSH2
 /**
  * Create an ssh key credential with a custom signing function.
  *
@@ -273,6 +293,7 @@ GIT_EXTERN(int) git_cred_ssh_custom_new(
 	size_t publickey_len,
 	git_cred_sign_callback sign_callback,
 	void *payload);
+#endif
 
 /**
  * Create a "default" credential usable for Negotiate mechanisms like NTLM
