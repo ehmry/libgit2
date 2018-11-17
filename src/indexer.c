@@ -72,14 +72,13 @@ const git_oid *git_indexer_hash(const git_indexer *idx)
 
 static int parse_header(struct git_pack_header *hdr, struct git_pack_file *pack)
 {
-	int error;
-	git_map map;
+	git_file fd = pack->mwf.fd;
 
-	if ((error = p_mmap(&map, sizeof(*hdr), GIT_PROT_READ, GIT_MAP_SHARED, pack->mwf.fd, 0)) < 0)
-		return error;
-
-	memcpy(hdr, map.data, sizeof(*hdr));
-	p_munmap(&map);
+	if ((p_lseek(fd, 0, SEEK_SET) < 0) ||
+		(p_read(fd, hdr, sizeof(*hdr)) != sizeof(*hdr))) {
+		giterr_set(GITERR_INDEXER, "failed to read pack header");
+		return -1;
+	}
 
 	/* Verify we recognize this pack file format. */
 	if (hdr->hdr_signature != ntohl(PACK_SIGNATURE)) {
@@ -461,62 +460,21 @@ static void hash_partially(git_indexer *idx, const uint8_t *data, size_t size)
 static int write_at(git_indexer *idx, const void *data, git_off_t offset, size_t size)
 {
 	git_file fd = idx->pack->mwf.fd;
-	size_t mmap_alignment;
-	size_t page_offset;
-	git_off_t page_start;
-	unsigned char *map_data;
-	git_map map;
-	int error;
 
 	assert(data && size);
-
-	if ((error = git__mmap_alignment(&mmap_alignment)) < 0)
-		return error;
-
-	/* the offset needs to be at the mmap boundary for the platform */
-	page_offset = offset % mmap_alignment;
-	page_start = offset - page_offset;
-
-	if ((error = p_mmap(&map, page_offset + size, GIT_PROT_WRITE, GIT_MAP_SHARED, fd, page_start)) < 0)
-		return error;
-
-	map_data = (unsigned char *)map.data;
-	memcpy(map_data + page_offset, data, size);
-	p_munmap(&map);
+	if ((p_lseek(fd, offset, SEEK_SET) < 0) ||
+		(p_write(fd, data, size) < 0)) {
+		giterr_set(GITERR_INDEXER, "write failed");
+		return -1;
+	}
 
 	return 0;
 }
 
 static int append_to_pack(git_indexer *idx, const void *data, size_t size)
 {
-	git_off_t new_size;
-	size_t mmap_alignment;
-	size_t page_offset;
-	git_off_t page_start;
-	git_off_t current_size = idx->pack->mwf.size;
-	int fd = idx->pack->mwf.fd;
-	int error;
-
 	if (!size)
 		return 0;
-
-	if ((error = git__mmap_alignment(&mmap_alignment)) < 0)
-		return error;
-
-	/* Write a single byte to force the file system to allocate space now or
-	 * report an error, since we can't report errors when writing using mmap.
-	 * Round the size up to the nearest page so that we only need to perform file
-	 * I/O when we add a page, instead of whenever we write even a single byte. */
-	new_size = current_size + size;
-	page_offset = new_size % mmap_alignment;
-	page_start = new_size - page_offset;
-
-	if (p_lseek(fd, page_start + mmap_alignment - 1, SEEK_SET) < 0 ||
-	    p_write(idx->pack->mwf.fd, data, 1) < 0) {
-		giterr_set(GITERR_OS, "cannot extend packfile '%s'", idx->pack->pack_name);
-		return -1;
-	}
-
 	return write_at(idx, data, idx->pack->mwf.size, size);
 }
 
