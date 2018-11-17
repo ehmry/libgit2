@@ -46,6 +46,8 @@ typedef struct {
 	char *cmd_receivepack;
 } ssh_subtransport;
 
+static int list_auth_methods(int *out, ssh_session session, const char *username);
+
 static void ssh_error(ssh_session session, const char *errmsg)
 {
 	giterr_set(GITERR_SSH, "%s: %s", errmsg, ssh_get_error(session));
@@ -382,11 +384,11 @@ static int request_creds(git_cred **out, ssh_subtransport *t, const char *user, 
 		error = t->owner->cred_acquire_cb(&cred, t->owner->url, user, auth_methods,
 						  t->owner->cred_acquire_payload);
 
-		if (error == GIT_PASSTHROUGH)
+		if (error == GIT_PASSTHROUGH) {
 			no_callback = 1;
-		else if (error < 0)
+		} else if (error < 0) {
 			return error;
-		else if (!cred) {
+		} else if (!cred) {
 			giterr_set(GITERR_SSH, "callback failed to initialize SSH credentials");
 			return -1;
 		}
@@ -532,14 +534,17 @@ post_extract:
 		user = git__strdup(((git_cred_username *) cred)->username);
 		cred->free(cred);
 		cred = NULL;
-		if (!user)
+		if (!user) {
 			goto done;
+		}
 	} else if (user && pass) {
 		if ((error = git_cred_userpass_plaintext_new(&cred, user, pass)) < 0)
 			goto done;
 	}
 
-	auth_methods =  ssh_userauth_list(session, NULL);
+	auth_methods = 0;
+	if ((error = list_auth_methods(&auth_methods, session, user)) < 0)
+		goto done;
 
 	error = GIT_EAUTH;
 	/* if we already have something to try */
@@ -713,6 +718,34 @@ static void _ssh_free(git_smart_subtransport *subtransport)
 	git__free(t);
 }
 #endif
+
+static int list_auth_methods(int *out, ssh_session session, const char *username)
+{
+	int rc;
+
+	rc = ssh_userauth_none(session, username);
+	switch (rc) {
+	case SSH_AUTH_SUCCESS:
+		*out = GIT_CREDTYPE_USERNAME;
+		return 0;
+	case SSH_AUTH_ERROR:
+		ssh_error(session, "failed to retrieve auth methods");
+		return -1;
+	default:
+		break;
+	}
+
+	rc = ssh_userauth_list(session, NULL);
+	*out |= (rc & SSH_AUTH_METHOD_PASSWORD)
+		? GIT_CREDTYPE_USERPASS_PLAINTEXT : 0;
+	*out |= (rc & SSH_AUTH_METHOD_PUBLICKEY)
+		? GIT_CREDTYPE_SSH_KEY : 0;
+
+	/* SSH_AUTH_METHOD_HOSTBASED */
+	/* SSH_AUTH_METHOD_INTERACTIVE */
+
+	return 0;
+}
 
 int git_smart_subtransport_ssh(
 	git_smart_subtransport **out, git_transport *owner, void *param)
