@@ -8,7 +8,7 @@
 #include "ssh.h"
 
 #ifdef GIT_SSH
-#include <libssh2.h>
+#include <libssh/libssh.h>
 #endif
 
 #include "global.h"
@@ -31,8 +31,8 @@ static const char cmd_receivepack[] = "git-receive-pack";
 typedef struct {
 	git_smart_subtransport_stream parent;
 	git_stream *io;
-	LIBSSH2_SESSION *session;
-	LIBSSH2_CHANNEL *channel;
+	ssh_session session;
+	ssh_channel channel;
 	const char *cmd;
 	char *url;
 	unsigned sent_command : 1;
@@ -47,15 +47,14 @@ typedef struct {
 	char *cmd_receivepack;
 } ssh_subtransport;
 
-static int list_auth_methods(int *out, LIBSSH2_SESSION *session, const char *username);
+static int list_auth_methods(int *out, ssh_session session, const char *username);
 
-static void ssh_error(LIBSSH2_SESSION *session, const char *errmsg)
+static void ssh_error(ssh_session session, const char *errmsg)
 {
-	char *ssherr;
-	libssh2_session_last_error(session, &ssherr, NULL, 0);
-
-	giterr_set(GITERR_SSH, "%s: %s", errmsg, ssherr);
+	giterr_set(GITERR_SSH, "%s: %s", errmsg, ssh_get_error(session));
 }
+
+#define NOT_IMP (giterr_set(GITERR_SSH, "%s not reimplemented for libssh", __func__))
 
 /*
  * Create a git protocol request.
@@ -112,8 +111,8 @@ static int send_command(ssh_stream *s)
 	if (error < 0)
 		goto cleanup;
 
-	error = libssh2_channel_exec(s->channel, request.ptr);
-	if (error < LIBSSH2_ERROR_NONE) {
+	error = ssh_channel_request_exec(s->channel, request.ptr);
+	if (error != SSH_OK) {
 		ssh_error(s->session, "SSH could not execute request");
 		goto cleanup;
 	}
@@ -139,7 +138,7 @@ static int ssh_stream_read(
 	if (!s->sent_command && send_command(s) < 0)
 		return -1;
 
-	if ((rc = libssh2_channel_read(s->channel, buffer, buf_size)) < LIBSSH2_ERROR_NONE) {
+        if ((rc = ssh_channel_read(s->channel, buffer, buf_size, 0)) < 0) {
 		ssh_error(s->session, "SSH could not read data");
 		return -1;
 	}
@@ -150,10 +149,10 @@ static int ssh_stream_read(
 	 * stderr.
 	 */
 	if (rc == 0) {
-		if ((rc = libssh2_channel_read_stderr(s->channel, buffer, buf_size)) > 0) {
+		if ((rc = ssh_channel_read(s->channel, buffer, buf_size, 1)) > 0) {
 			giterr_set(GITERR_SSH, "%*s", rc, buffer);
 			return GIT_EEOF;
-		} else if (rc < LIBSSH2_ERROR_NONE) {
+		} else if (rc < 0) {
 			ssh_error(s->session, "SSH could not read stderr");
 			return -1;
 		}
@@ -178,7 +177,7 @@ static int ssh_stream_write(
 		return -1;
 
 	do {
-		ret = libssh2_channel_write(s->channel, buffer + off, len - off);
+		ret = ssh_channel_write(s->channel, buffer + off, len - off);
 		if (ret < 0)
 			break;
 
@@ -206,14 +205,14 @@ static void ssh_stream_free(git_smart_subtransport_stream *stream)
 	t->current_stream = NULL;
 
 	if (s->channel) {
-		libssh2_channel_close(s->channel);
-		libssh2_channel_free(s->channel);
+		ssh_channel_close(s->channel);
+		ssh_channel_free(s->channel);
 		s->channel = NULL;
 	}
 
 	if (s->session) {
-		libssh2_session_disconnect(s->session, "closing transport");
-		libssh2_session_free(s->session);
+		ssh_disconnect(s->session);
+		ssh_free(s->session);
 		s->session = NULL;
 	}
 
@@ -289,145 +288,87 @@ static int git_ssh_extract_url_parts(
 	return 0;
 }
 
-static int ssh_agent_auth(LIBSSH2_SESSION *session, git_cred_ssh_key *c) {
-	int rc = LIBSSH2_ERROR_NONE;
+static int ssh_key_auth(ssh_session session, git_cred_ssh_key *c) {
+	int rc;
+	ssh_key public = NULL;
+	ssh_key private = NULL;
 
-	struct libssh2_agent_publickey *curr, *prev = NULL;
+	rc = ssh_pki_import_pubkey_file(c->publickey, &public);
+	if (rc != SSH_OK) return rc;
 
-	LIBSSH2_AGENT *agent = libssh2_agent_init(session);
+	rc = ssh_userauth_try_publickey(session, c->username, public);
+	ssh_key_free(public);
+	if (rc != SSH_AUTH_SUCCESS) return rc;
 
-	if (agent == NULL)
-		return -1;
+	rc = ssh_pki_import_privkey_file(c->privatekey, c->passphrase,
+	                                 NULL, NULL, &private);
+	if (rc != SSH_OK) return rc;
 
-	rc = libssh2_agent_connect(agent);
-
-	if (rc != LIBSSH2_ERROR_NONE)
-		goto shutdown;
-
-	rc = libssh2_agent_list_identities(agent);
-
-	if (rc != LIBSSH2_ERROR_NONE)
-		goto shutdown;
-
-	while (1) {
-		rc = libssh2_agent_get_identity(agent, &curr, prev);
-
-		if (rc < 0)
-			goto shutdown;
-
-		/* rc is set to 1 whenever the ssh agent ran out of keys to check.
-		 * Set the error code to authentication failure rather than erroring
-		 * out with an untranslatable error code.
-		 */
-		if (rc == 1) {
-			rc = LIBSSH2_ERROR_AUTHENTICATION_FAILED;
-			goto shutdown;
-		}
-
-		rc = libssh2_agent_userauth(agent, c->username, curr);
-
-		if (rc == 0)
-			break;
-
-		prev = curr;
-	}
-
-shutdown:
-
-	if (rc != LIBSSH2_ERROR_NONE)
-		ssh_error(session, "error authenticating");
-
-	libssh2_agent_disconnect(agent);
-	libssh2_agent_free(agent);
+	rc = ssh_userauth_publickey(session, c->username, private);
+	ssh_key_free(private);
 
 	return rc;
 }
 
+static int ssh_agent_auth(ssh_session session, git_cred_ssh_key *c) {
+	(void)session;
+	(void)c;
+	NOT_IMP;
+	return -1;
+}
+
 static int _git_ssh_authenticate_session(
-	LIBSSH2_SESSION* session,
+	ssh_session session,
 	git_cred* cred)
 {
 	int rc;
 
-	do {
-		giterr_clear();
-		switch (cred->credtype) {
-		case GIT_CREDTYPE_USERPASS_PLAINTEXT: {
-			git_cred_userpass_plaintext *c = (git_cred_userpass_plaintext *)cred;
-			rc = libssh2_userauth_password(session, c->username, c->password);
-			break;
+	giterr_clear();
+	switch (cred->credtype) {
+	case GIT_CREDTYPE_SSH_KEY: {
+		git_cred_ssh_key *c = (git_cred_ssh_key *)cred;
+
+		if (c->privatekey) {
+			rc = ssh_key_auth(session, c);
+		} else {
+			rc = ssh_agent_auth(session, c);
 		}
-		case GIT_CREDTYPE_SSH_KEY: {
-			git_cred_ssh_key *c = (git_cred_ssh_key *)cred;
-
-			if (c->privatekey)
-				rc = libssh2_userauth_publickey_fromfile(
-					session, c->username, c->publickey,
-					c->privatekey, c->passphrase);
-			else
-				rc = ssh_agent_auth(session, c);
-
-			break;
-		}
-		case GIT_CREDTYPE_SSH_CUSTOM: {
-			git_cred_ssh_custom *c = (git_cred_ssh_custom *)cred;
-
-			rc = libssh2_userauth_publickey(
-				session, c->username, (const unsigned char *)c->publickey,
-				c->publickey_len, c->sign_callback, &c->payload);
-			break;
-		}
-		case GIT_CREDTYPE_SSH_INTERACTIVE: {
-			void **abstract = libssh2_session_abstract(session);
-			git_cred_ssh_interactive *c = (git_cred_ssh_interactive *)cred;
-
-			/* ideally, we should be able to set this by calling
-			 * libssh2_session_init_ex() instead of libssh2_session_init().
-			 * libssh2's API is inconsistent here i.e. libssh2_userauth_publickey()
-			 * allows you to pass the `abstract` as part of the call, whereas
-			 * libssh2_userauth_keyboard_interactive() does not!
-			 *
-			 * The only way to set the `abstract` pointer is by calling
-			 * libssh2_session_abstract(), which will replace the existing
-			 * pointer as is done below. This is safe for now (at time of writing),
-			 * but may not be valid in future.
-			 */
-			*abstract = c->payload;
-
-			rc = libssh2_userauth_keyboard_interactive(
-				session, c->username, c->prompt_callback);
-			break;
-		}
+		break;
+	}
 #ifdef GIT_SSH_MEMORY_CREDENTIALS
-		case GIT_CREDTYPE_SSH_MEMORY: {
-			git_cred_ssh_key *c = (git_cred_ssh_key *)cred;
+	case GIT_CREDTYPE_SSH_MEMORY: {
+		git_cred_ssh_key *c = (git_cred_ssh_key *)cred;
 
-			assert(c->username);
-			assert(c->privatekey);
+		assert(c->username);
+		assert(c->privatekey);
 
-			rc = libssh2_userauth_publickey_frommemory(
-				session,
-				c->username,
-				strlen(c->username),
-				c->publickey,
-				c->publickey ? strlen(c->publickey) : 0,
-				c->privatekey,
-				strlen(c->privatekey),
-				c->passphrase);
-			break;
-		}
+		rc = libssh2_userauth_publickey_frommemory(
+			session,
+			c->username,
+			strlen(c->username),
+			c->publickey,
+			c->publickey ? strlen(c->publickey) : 0,
+			c->privatekey,
+			strlen(c->privatekey),
+			c->passphrase);
+		break;
+	}
 #endif
-		default:
-			rc = LIBSSH2_ERROR_AUTHENTICATION_FAILED;
-		}
-	} while (LIBSSH2_ERROR_EAGAIN == rc || LIBSSH2_ERROR_TIMEOUT == rc);
+	case GIT_CREDTYPE_USERPASS_PLAINTEXT: {
+		git_cred_userpass_plaintext *c = (git_cred_userpass_plaintext *)cred;
+		rc = ssh_userauth_password(session, c->username, c->password);
+		break;
+	}
+	case GIT_CREDTYPE_USERNAME: {
+		git_cred_username *c = (git_cred_username *)cred;
+		rc = ssh_userauth_none(session, c->username);
+		break;
+	}
+	default:
+		rc = SSH_AUTH_ERROR;
+	}
 
-	if (rc == LIBSSH2_ERROR_PASSWORD_EXPIRED ||
-		rc == LIBSSH2_ERROR_AUTHENTICATION_FAILED ||
-		rc == LIBSSH2_ERROR_PUBLICKEY_UNVERIFIED)
-			return GIT_EAUTH;
-
-	if (rc != LIBSSH2_ERROR_NONE) {
+	if (rc != SSH_OK) {
 		if (!giterr_last())
 			ssh_error(session, "Failed to authenticate SSH session");
 		return -1;
@@ -447,11 +388,11 @@ static int request_creds(git_cred **out, ssh_subtransport *t, const char *user, 
 		error = t->owner->cred_acquire_cb(&cred, t->owner->url, user, auth_methods,
 						  t->owner->cred_acquire_payload);
 
-		if (error == GIT_PASSTHROUGH)
+		if (error == GIT_PASSTHROUGH) {
 			no_callback = 1;
-		else if (error < 0)
+		} else if (error < 0) {
 			return error;
-		else if (!cred) {
+		} else if (!cred) {
 			giterr_set(GITERR_SSH, "callback failed to initialize SSH credentials");
 			return -1;
 		}
@@ -473,39 +414,6 @@ static int request_creds(git_cred **out, ssh_subtransport *t, const char *user, 
 	return 0;
 }
 
-static int _git_ssh_session_create(
-	LIBSSH2_SESSION** session,
-	git_stream *io)
-{
-	int rc = 0;
-	LIBSSH2_SESSION* s;
-	git_socket_stream *socket = (git_socket_stream *) io;
-
-	assert(session);
-
-	s = libssh2_session_init();
-	if (!s) {
-		giterr_set(GITERR_NET, "failed to initialize SSH session");
-		return -1;
-	}
-
-	do {
-		rc = libssh2_session_handshake(s, socket->s);
-	} while (LIBSSH2_ERROR_EAGAIN == rc || LIBSSH2_ERROR_TIMEOUT == rc);
-
-	if (rc != LIBSSH2_ERROR_NONE) {
-		ssh_error(s, "failed to start SSH session");
-		libssh2_session_free(s);
-		return -1;
-	}
-
-	libssh2_session_set_blocking(s, 1);
-
-	*session = s;
-
-	return 0;
-}
-
 static int _git_ssh_setup_conn(
 	ssh_subtransport *t,
 	const char *url,
@@ -518,8 +426,11 @@ static int _git_ssh_setup_conn(
 	size_t i;
 	ssh_stream *s;
 	git_cred *cred = NULL;
-	LIBSSH2_SESSION* session=NULL;
-	LIBSSH2_CHANNEL* channel=NULL;
+	ssh_session session = NULL;
+	ssh_channel channel = NULL;
+	ssh_key hostkey = NULL;
+    unsigned char *hash = NULL;
+    size_t hashlen = 0;
 
 	t->current_stream = NULL;
 
@@ -551,32 +462,57 @@ post_extract:
 	    (error = git_stream_connect(s->io)) < 0)
 		goto done;
 
-	if ((error = _git_ssh_session_create(&session, s->io)) < 0)
+	session = ssh_new();
+	if (!session)
 		goto done;
+
+	ssh_options_set(session, SSH_OPTIONS_HOST, host);
+	ssh_options_set(session, SSH_OPTIONS_PORT_STR, port);
+
+	error = ssh_connect(session);
+	if (error != SSH_OK) {
+		ssh_error(session, "unable to get the host key");
+		goto done;
+	}
 
 	if (t->owner->certificate_check_cb != NULL) {
 		git_cert_hostkey cert = {{ 0 }}, *cert_ptr;
-		const char *key;
 
-		cert.parent.cert_type = GIT_CERT_HOSTKEY_LIBSSH2;
+		cert.parent.cert_type = GIT_CERT_HOSTKEY_SSH;
 
-		key = libssh2_hostkey_hash(session, LIBSSH2_HOSTKEY_HASH_SHA1);
-		if (key != NULL) {
-			cert.type |= GIT_CERT_SSH_SHA1;
-			memcpy(&cert.hash_sha1, key, 20);
-		}
-
-		key = libssh2_hostkey_hash(session, LIBSSH2_HOSTKEY_HASH_MD5);
-		if (key != NULL) {
-			cert.type |= GIT_CERT_SSH_MD5;
-			memcpy(&cert.hash_md5, key, 16);
-		}
-
-		if (cert.type == 0) {
-			giterr_set(GITERR_SSH, "unable to get the host key");
-			error = -1;
+		error = ssh_get_server_publickey(session, &hostkey);
+		if (error != SSH_OK) {
+			ssh_error(session, "unable to get the host key");
 			goto done;
 		}
+
+		if (ssh_get_publickey_hash(hostkey, SSH_PUBLICKEY_HASH_SHA256,
+			                       &hash, &hashlen) == 0) {
+
+			cert.type |= GIT_CERT_SSH_SHA256;
+			memcpy(&cert.hash_sha256, hash, hashlen);
+			ssh_clean_pubkey_hash(&hash);
+		}
+
+		if (ssh_get_publickey_hash(hostkey, SSH_PUBLICKEY_HASH_SHA1,
+			                       &hash, &hashlen) == 0) {
+
+			cert.type |= GIT_CERT_SSH_SHA1;
+			memcpy(&cert.hash_sha1, hash, hashlen);
+			ssh_clean_pubkey_hash(&hash);
+		}
+
+#ifdef SSH_MD5
+		if (ssh_get_publickey_hash(hostkey, SSH_PUBLICKEY_HASH_MD5,
+			                       &hash, &hashlen) == 0) {
+
+			cert.type |= GIT_CERT_SSH_MD5;
+			memcpy(&cert.hash_md5, hash, hashlen);
+			ssh_clean_pubkey_hash(&hash);
+		}
+#endif
+
+		ssh_key_free(hostkey);
 
 		/* We don't currently trust any hostkeys */
 		giterr_clear();
@@ -600,13 +536,15 @@ post_extract:
 		user = git__strdup(((git_cred_username *) cred)->username);
 		cred->free(cred);
 		cred = NULL;
-		if (!user)
+		if (!user) {
 			goto done;
+		}
 	} else if (user && pass) {
 		if ((error = git_cred_userpass_plaintext_new(&cred, user, pass)) < 0)
 			goto done;
 	}
 
+	auth_methods = 0;
 	if ((error = list_auth_methods(&auth_methods, session, user)) < 0)
 		goto done;
 
@@ -636,14 +574,20 @@ post_extract:
 	if (error < 0)
 		goto done;
 
-	channel = libssh2_channel_open_session(session);
+	channel = ssh_channel_new(session);
 	if (!channel) {
+		error = -1;
+		ssh_error(session, "Failed to allocate SSH channel");
+		goto done;
+	}
+
+	if (ssh_channel_open_session(channel) != SSH_OK) {
 		error = -1;
 		ssh_error(session, "Failed to open SSH channel");
 		goto done;
 	}
 
-	libssh2_channel_set_blocking(channel, 1);
+	ssh_set_blocking(session, 1);
 
 	s->session = session;
 	s->channel = channel;
@@ -654,8 +598,13 @@ done:
 	if (error < 0) {
 		ssh_stream_free(*stream);
 
-		if (session)
-			libssh2_session_free(session);
+		if (channel)
+			ssh_channel_free(channel);
+
+		if (session) {
+			ssh_disconnect(session);
+			ssh_free(session);
+		}
 	}
 
 	if (cred)
@@ -770,59 +719,35 @@ static void _ssh_free(git_smart_subtransport *subtransport)
 	git__free(t->cmd_receivepack);
 	git__free(t);
 }
-
-#define SSH_AUTH_PUBLICKEY "publickey"
-#define SSH_AUTH_PASSWORD "password"
-#define SSH_AUTH_KEYBOARD_INTERACTIVE "keyboard-interactive"
-
-static int list_auth_methods(int *out, LIBSSH2_SESSION *session, const char *username)
-{
-	const char *list, *ptr;
-
-	*out = 0;
-
-	list = libssh2_userauth_list(session, username, strlen(username));
-
-	/* either error, or the remote accepts NONE auth, which is bizarre, let's punt */
-	if (list == NULL && !libssh2_userauth_authenticated(session)) {
-		ssh_error(session, "Failed to retrieve list of SSH authentication methods");
-		return -1;
-	}
-
-	ptr = list;
-	while (ptr) {
-		if (*ptr == ',')
-			ptr++;
-
-		if (!git__prefixcmp(ptr, SSH_AUTH_PUBLICKEY)) {
-			*out |= GIT_CREDTYPE_SSH_KEY;
-			*out |= GIT_CREDTYPE_SSH_CUSTOM;
-#ifdef GIT_SSH_MEMORY_CREDENTIALS
-			*out |= GIT_CREDTYPE_SSH_MEMORY;
 #endif
-			ptr += strlen(SSH_AUTH_PUBLICKEY);
-			continue;
-		}
 
-		if (!git__prefixcmp(ptr, SSH_AUTH_PASSWORD)) {
-			*out |= GIT_CREDTYPE_USERPASS_PLAINTEXT;
-			ptr += strlen(SSH_AUTH_PASSWORD);
-			continue;
-		}
+static int list_auth_methods(int *out, ssh_session session, const char *username)
+{
+	int rc;
 
-		if (!git__prefixcmp(ptr, SSH_AUTH_KEYBOARD_INTERACTIVE)) {
-			*out |= GIT_CREDTYPE_SSH_INTERACTIVE;
-			ptr += strlen(SSH_AUTH_KEYBOARD_INTERACTIVE);
-			continue;
-		}
-
-		/* Skipt it if we don't know it */
-		ptr = strchr(ptr, ',');
+	rc = ssh_userauth_none(session, username);
+	switch (rc) {
+	case SSH_AUTH_SUCCESS:
+		*out = GIT_CREDTYPE_USERNAME;
+		return 0;
+	case SSH_AUTH_ERROR:
+		ssh_error(session, "failed to retrieve auth methods");
+		return -1;
+	default:
+		break;
 	}
+
+	rc = ssh_userauth_list(session, NULL);
+	*out |= (rc & SSH_AUTH_METHOD_PASSWORD)
+		? GIT_CREDTYPE_USERPASS_PLAINTEXT : 0;
+	*out |= (rc & SSH_AUTH_METHOD_PUBLICKEY)
+		? GIT_CREDTYPE_SSH_KEY : 0;
+
+	/* SSH_AUTH_METHOD_HOSTBASED */
+	/* SSH_AUTH_METHOD_INTERACTIVE */
 
 	return 0;
 }
-#endif
 
 int git_smart_subtransport_ssh(
 	git_smart_subtransport **out, git_transport *owner, void *param)
@@ -900,28 +825,8 @@ int git_transport_ssh_with_paths(git_transport **out, git_remote *owner, void *p
 #endif
 }
 
-#ifdef GIT_SSH
-static void shutdown_ssh(void)
-{
-    libssh2_exit();
-}
-#endif
-
 int git_transport_ssh_global_init(void)
 {
-#ifdef GIT_SSH
-	if (libssh2_init(0) < 0) {
-		giterr_set(GITERR_SSH, "unable to initialize libssh2");
-		return -1;
-	}
-
-	git__on_shutdown(shutdown_ssh);
+	/* no initialization necessary (a true library) */
 	return 0;
-
-#else
-
-	/* Nothing to initialize */
-	return 0;
-
-#endif
 }
