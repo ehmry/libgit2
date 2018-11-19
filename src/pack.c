@@ -230,7 +230,8 @@ static int pack_index_check(const char *path, struct git_pack_file *p)
 		return -1;
 	}
 
-	error = git_futils_mmap_ro(&p->index_map, fd, 0, idx_size);
+	return -1;
+	//error = git_futils_mmap_ro(&p->index_map, fd, 0, idx_size);
 
 	p_close(fd);
 

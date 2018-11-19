@@ -14,6 +14,7 @@
 #include "pool.h"
 #include "strmap.h"
 #include "oid.h"
+#include "trace.h"
 
 /**
  * Filebuffer methods
@@ -281,11 +282,16 @@ extern mode_t git_futils_canonical_mode(mode_t raw_mode);
  * - 0 on success;
  * - -1 on error.
  */
+/*
 extern int git_futils_mmap_ro(
 	git_map *out,
 	git_file fd,
 	git_off_t begin,
 	size_t len);
+*/
+
+#define git_futils_mmap_ro(...) (git_trace(GIT_TRACE_ERROR, "%s git_futils_mmap_ro", __func__))
+
 
 /**
  * Read-only map an entire file.

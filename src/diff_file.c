@@ -338,18 +338,6 @@ static int diff_file_content_load_workdir_file(
 			GIT_FILTER_TO_ODB, GIT_FILTER_ALLOW_UNSAFE)) < 0)
 		goto cleanup;
 
-	/* if there are no filters, try to mmap the file */
-	if (fl == NULL) {
-		if (!(error = git_futils_mmap_ro(
-				&fc->map, fd, 0, (size_t)fc->file->size))) {
-			fc->flags |= GIT_DIFF_FLAG__UNMAP_DATA;
-			goto cleanup;
-		}
-
-		/* if mmap failed, fall through to try readbuffer below */
-		giterr_clear();
-	}
-
 	if (!(error = git_futils_readbuffer_fd(&raw, fd, (size_t)fc->file->size))) {
 		git_buf out = GIT_BUF_INIT;
 

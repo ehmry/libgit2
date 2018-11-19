@@ -254,59 +254,7 @@ static git_mwindow *new_window(
 	git_off_t size,
 	git_off_t offset)
 {
-	git_mwindow_ctl *ctl = &mem_ctl;
-	size_t walign = git_mwindow__window_size / 2;
-	git_off_t len;
-	git_mwindow *w;
-
-	w = git__malloc(sizeof(*w));
-
-	if (w == NULL)
-		return NULL;
-
-	memset(w, 0x0, sizeof(*w));
-	w->offset = (offset / walign) * walign;
-
-	len = size - w->offset;
-	if (len > (git_off_t)git_mwindow__window_size)
-		len = (git_off_t)git_mwindow__window_size;
-
-	ctl->mapped += (size_t)len;
-
-	while (git_mwindow__mapped_limit < ctl->mapped &&
-			git_mwindow_close_lru(mwf) == 0) /* nop */;
-
-	/*
-	 * We treat `mapped_limit` as a soft limit. If we can't find a
-	 * window to close and are above the limit, we still mmap the new
-	 * window.
-	 */
-
-	if (git_futils_mmap_ro(&w->window_map, fd, w->offset, (size_t)len) < 0) {
-		/*
-		 * The first error might be down to memory fragmentation even if
-		 * we're below our soft limits, so free up what we can and try again.
-		 */
-
-		while (git_mwindow_close_lru(mwf) == 0)
-			/* nop */;
-
-		if (git_futils_mmap_ro(&w->window_map, fd, w->offset, (size_t)len) < 0) {
-			git__free(w);
-			return NULL;
-		}
-	}
-
-	ctl->mmap_calls++;
-	ctl->open_windows++;
-
-	if (ctl->mapped > ctl->peak_mapped)
-		ctl->peak_mapped = ctl->mapped;
-
-	if (ctl->open_windows > ctl->peak_open_windows)
-		ctl->peak_open_windows = ctl->open_windows;
-
-	return w;
+	return NULL;
 }
 
 /*

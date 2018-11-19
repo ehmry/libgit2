@@ -236,28 +236,8 @@ int git__mmap_alignment(size_t *alignment)
 
 int p_mmap(git_map *out, size_t len, int prot, int flags, int fd, git_off_t offset)
 {
-	GIT_MMAP_VALIDATE(out, len, prot, flags);
-
-	out->data = NULL;
-	out->len = 0;
-
-	if ((prot & GIT_PROT_WRITE) && ((flags & GIT_MAP_TYPE) == GIT_MAP_SHARED)) {
-		giterr_set(GITERR_OS, "trying to map shared-writeable");
-		return -1;
-	}
-
-	out->data = malloc(len);
-	GITERR_CHECK_ALLOC(out->data);
-
-	if (!git__is_ssizet(len) ||
-		(p_lseek(fd, offset, SEEK_SET) < 0) ||
-		(p_read(fd, out->data, len) != (ssize_t)len)) {
-		giterr_set(GITERR_OS, "mmap emulation failed");
-		return -1;
-	}
-
-	out->len = len;
-	return 0;
+	giterr_set(GITERR_OS, "p_mmap not available");
+	return -1;
 }
 
 int p_munmap(git_map *map)

@@ -8,6 +8,7 @@
 #include "fileops.h"
 #include "global.h"
 #include "strmap.h"
+#include "trace.h"
 #include <ctype.h>
 #if GIT_WIN32
 #include "win32/findfile.h"
@@ -290,35 +291,18 @@ int git_futils_mv_withpath(const char *from, const char *to, const mode_t dirmod
 	return 0;
 }
 
+/*
 int git_futils_mmap_ro(git_map *out, git_file fd, git_off_t begin, size_t len)
 {
-	return p_mmap(out, len, GIT_PROT_READ, GIT_MAP_SHARED, fd, begin);
+	git_trace(GIT_TRACE_ERROR, "%s", __func__);
+	return -1;
 }
+*/
 
 int git_futils_mmap_ro_file(git_map *out, const char *path)
 {
-	git_file fd = git_futils_open_ro(path);
-	git_off_t len;
-	int result;
-
-	if (fd < 0)
-		return fd;
-
-	if ((len = git_futils_filesize(fd)) < 0) {
-		result = -1;
-		goto out;
-	}
-
-	if (!git__is_sizet(len)) {
-		giterr_set(GITERR_OS, "file `%s` too large to mmap", path);
-		result = -1;
-		goto out;
-	}
-
-	result = git_futils_mmap_ro(out, fd, 0, (size_t)len);
-out:
-	p_close(fd);
-	return result;
+	git_trace(GIT_TRACE_ERROR, "%s `%s`", __func__, path);
+	return -1;
 }
 
 void git_futils_mmap_free(git_map *out)
